@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gloopy</title>
+  <style>
+    html, body { margin: 0px; padding: 0px; height: 100%; }    
+    #gloopy { height: 100%; }
+    #gloopy a { color: #fff; }
+    #gloopy .fs { 
+      width: 100%; height: 100%; 
+      top: 0px; left: 0px; 
+      position: absolute; display: block; 
+    }
+    #gloopy #controls {
+      font-family: sans-serif;
+      background-color: #123; color: #eee;      
+      text-align: center;
+      width: 22em; left: 25%; 
+      padding: 0px 2em;
+      overflow: auto;
+    }
+    #gloopy #controls button {
+      font-size: x-large;
+    }
+  </style>  
+</head>
+<body>  
+  <div id="gloopy">
+    <canvas id="back" class="fs"></canvas>
+    <canvas id="front" class="fs"></canvas>
+    <div id="controls" class="fs">
+      <h1>Gloopy</h1>
+      <p>A HTML5/Canvas <a href="http://en.wikipedia.org/wiki/Liquid_War">LiquidWar</a></p>
+      <p>by <a href="http://mygen.ca">Martin Humphreys</a></p>
+      <fieldset>
+        <legend>Controls</legend>
+        <table style="width: 100%;">
+          <tr><td>Up Arrow / W</td><td>Forward</td></tr>
+          <tr><td>Down Arrow / S</td><td>Backwards</td></tr>          
+          <tr><td>Left Arrow / Q</td><td>Turn Left</td></tr>
+          <tr><td>Right Arrow / E</td><td>Turn Right</td></tr>
+          <tr><td>A</td><td>Strafe Left</td></tr>
+          <tr><td>D</td><td>Strafe Right</td></tr>
+        </table>
+      </fieldset>
+      <fieldset>
+        <legend>Map</legend>
+        <div id="mapPreviews">
+        
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Options</legend>
+        <label> 
+          <input id="numCPUs" type="number" value="5" style="width: 3em;">
+          Opponents (1-13)
+        </label>
+        <br />
+        <label>
+          <input id="startPoints" type="number" value="10" style="width: 3em;">
+          Starting points (5-25)        
+        </label>
+        <br />
+        <label>
+          <input id="fastRaycast" type="checkbox" checked="checked">
+          Use fast raycaster
+        </label>        
+      </fieldset>
+      <button id="startGame">Start Game</button>
+    </div>
+  </div>
+  <script type="text/javascript">
+  
+  (function(W, D){
+
+    // customizations
+    var size = 200;    
+    var fov = rad(75);    
+    var markerClr = "#00EEEE";
+
+    // Colours to use for the players
+    var playerClr = [0,0,1];
+    var cpuClrs = [
+      [1,0,0], [0,1,0], [1,1,0], [1,0,1], [1,0.5,0], [0.5,1,0],
+      [0.5,0,0], [0,0.5,0], [0.5,0.5,0], [0.5,0,0.5], [0.5,0.25,0],
+      [0,0.5,0.5], [0.5, 0.5, 0.5]
+    ];
+    
+    // keep track of these
+    var intervals = [];
+    
+    // Save precious bytes
+    var L = "length";
+    
+    // clobbered locals    
+    var startPoints = 10;
+    var viewDistance = 150;
+    
+    // Game maps (generate walls)
+    var maps = {
+      Box: function (map, size){
+        for(var i = 1; i < 5; i++ ){        
+          for(var j = 1; j < 5; j++){
+            map.rect(i*size/5-13, j*size/5-13, 26, 26)
+          }
+        }        
+      },            
+      Pillr: function (map, size){
+        var x = size/8;
+        map.rect(x, x, size-x*2, x)
+        map.rect(x, size-x*2, size-x*2, x)
+        map.rect(x, x*3, x, size-x*5)
+        map.rect(size-x*2, x*2, x, size-x*5)
+        map.rect(size/2-x, size/2-x, x*2, x*2);
+      },
+      E: function (map, size){
+        var x = size/8
+        map.rect(x/1.5, x, x, size-(x*2));
+        map.rect(x*2.5, x, size-(x*3), x);
+        map.rect(x*2.5, x*3, size-(x*2.5), x*2);
+        map.rect(x*2.5, x*6, size-(x*3), x);
+      },
+      Arena: function (map, size){
+        var x = size/8
+        // outside walls        
+        map.rect(size-x*1.25, x*0.25, x, size-(x*0.5));
+        map.rect(x*0.25, size-x*1.25, size-(x*0.5), x);
+        map.rect(x*0.25, x*0.25, x, size-(x*0.5));
+        map.rect(x*0.25, x*0.25, size-(x*0.5), x);        
+      },
+      /*
+      Arena2: function (map, size){
+        var x = size/8
+        // outside walls
+        maps.Arena(map, size);
+        // islands        
+        map.rect(x*2.25, x*2.25, x, x);        
+        map.rect(size-x*3.25, x*2.25, x, x);
+        map.rect(x*2.25, size-x*3.25, x, x);
+        map.rect(size-x*3.25, size-x*3.25, x, x);
+        map.rect(size/2-x/2, size/2-x/2, x, x);
+      },
+      */
+      /*
+      Fuz: function(map, size){
+        var b = 3;
+        for(var x = 0; x < size/5; x++){
+          for(var y = 0; y < size/5; y++){
+            map.rect(((size-b)*rand())|0, ((size-b)*rand())|0, b, b)
+          }
+        }
+      },
+      */      
+      Checkrs: function(map, size){
+        var s = size/8;
+        t = false;  
+        for(var x = 0; x < 8; x++){
+          for(var y = 0; y < 8; y++){
+            if(t) map.rect(1+x*s, 1+y*s, s-2, s-2);
+            t = !t
+          }
+          t = !t
+        }
+      }
+    }
+    var defaultMap = maps.Box;
+
+    // simple []->fn iterator 
+    // each([1,2,3], function(n){ alert(n) })
+    function each(ar, fn, ctx){ 
+      for(var i = 0, l = ar[L]; i < l; ++i){
+        fn.call(ctx || this, ar[i], i, ar);
+      }
+    };
+    
+    // find a matching [{idx: val}]
+    // find([{a: "foo", b: "bar"}, {a: "fizz", b: "baz"}], "a", "fizz")
+    function find(ar, idx, val){
+      for(var i = 0, l = ar[L]; i < l; ++i){
+        if (ar[i][idx] === val) return ar[i];
+      }
+    };
+
+    // y combinator
+    // var fact = Y(function(f){ return function(x){ return x == 0 ? 1 : x*f(x-1) }}
+    function Y(f) {
+      return (function(g){ return g(g) })(function(h) {
+        return function(){ return f(h(h)).apply(null, arguments) }
+      })
+    };
+
+    // convert between radians and degrees
+    function rad(deg){ return deg * Math.PI/180 }
+    function deg(rad){ return rad / Math.PI/180 }
+    
+    // Other useful functions
+    function abs(n){ return n < 0 ? -n : n }    
+    function gtx(n, x){ return n > x ? n : x }
+    function ltx(n, x){ return n < x ? n : x }
+    function box(n, x, y){ return gtx(ltx(n, x || 0), y || 0) }    
+    function sq(n){ return n*n; };
+    var sqrt = Math.sqrt;
+    var cos = Math.cos, sin = Math.sin, atan = Math.tan, atan2 = Math.atan2;
+    function distxy(x1, y1, x2, y2){ return sqrt(sq(x2-x1)+sq(y2-y1)) }
+    function udef(){ return }    
+    function byId(id){ return D.getElementById(id) }
+    var make = function(a){ return D.createElement(a); };
+    var rand = Math.random, rando = (function(){
+      function mix(){ return rand() - 0.5 }
+      return function(ar){ ar.sort(mix); return ar }  
+    })()
+
+    // constants
+    var PI = Math.PI, PI2 = PI*2; 
+
+    // memoizer
+    function memo(size){
+      var o = {}, a = [], s = size || Infinity;
+      return function(k, i){        
+        if(i){
+          o[k] = i; a.push(i);
+          if (a[L] > s) delete o[a.shift()];
+          return i
+        } else {
+          return o[k]
+        }
+      }
+    } 
+    
+    // add an event listener
+    // listen("click", window, function(e){ alert("page clicked") })
+    var listen = (function (){
+      var a = make("A");
+      if (a.addEventListener){ // W3C DOM
+        return function (ev, el, fn) {
+          return el.addEventListener(ev, function(e){ fn(e||window.event) }, false)
+        } 
+      } else if (a.attachEvent) { // IE DOM
+        return function (ev, el, fn) {
+          return el.attachEvent("on"+ev, function(e){ fn(e||window.event) });          
+        }        
+      } else {
+        return function (ev, el, fn) {
+          ev = "on"+ev;
+          var pfn = el[ev];
+          if (!pfn) el[ev] = function(e){ e = e || window.event; fn(e) } 
+          else el[ev] = function(e){ e = e || window.event; pfn(e); fn(e) }
+        }
+      }
+    })();
+    
+    
+
+    // keeps track of keyboard state
+    // if(keyboard.LEFT){ goLeft() }
+    var keyboard = (function(){
+      var kb = {}
+      var km = { 37: "LEFT", 38: "UP", 39: "RIGHT", 40: "DOWN" }
+      listen("keydown", W, function(e){
+        var key = e.keyCode;
+        if(key in km) kb[km[key]] = true;          
+        else kb[String.fromCharCode(key)] = true;
+      })
+      listen("keyup", W, function(e){
+        var key = e.keyCode;
+        if(key in km) kb[km[key]] = false;          
+        else kb[String.fromCharCode(key)] = false;
+      });
+      return kb;
+    })();
+
+    // screen size dimensions
+    // var halfWidth = screen().width / 2
+    var screen = (function() {      
+      if( typeof(W.innerWidth) == 'number' ) {
+        return function(){ return { //Non-IE
+          width: W.innerWidth, 
+          height: W.innerHeight
+        }}
+      } else if (D.documentElement && (D.documentElement.clientWidth || D.documentElement.clientHeight)) {
+        return function(){ return { //IE 6+ in 'standards compliant mode'
+          width: document.documentElement.clientWidth,
+          height: document.documentElement.clientHeight
+        }}
+      } else if (D.body && (D.body.clientWidth || D.body.clientHeight)) {
+        return function(){ return { //IE 4 compatible
+          width: document.body.clientWidth,
+          height: document.body.clientHeight
+        }}
+      }      
+    })();
+    
+    // Colour functions
+    // var c = rgba(0,1,0) // green  
+    function rgba(r,g,b,a){
+      if (this.constructor == rgba) {        
+        this.r = r, this.g = g, this.b = b;
+        this.a = a !== udef() ? a : 1;
+        return this
+      } else {        
+        return new rgba(r,g,b,a)      
+      }
+    }
+
+    // colour.toHsla() -> [hue, saturation, lightness, alpha]
+    rgba.prototype.toHsla = (function(){
+      var cache = memo(513);
+      return function(){
+        var key = ""+this.valueOf(), cached = cache(key); 
+        if(cached) return cached.slice(0);
+        var r = this.r, g = this.g, b = this.b;
+        var max = Math.max(r, g, b), min = Math.min(r, g, b);
+        var h, s, l = (max + min) / 2;
+        if(max == min) h = s = 0; // achromatic
+        else{
+            var d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            switch(max){
+                case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                case g: h = (b - r) / d + 2; break;
+                case b: h = (r - g) / d + 4; break;
+            }
+            h /= 6;
+        }
+        return cache(key, [h, s, l, this.a]);
+      }
+    })()
+    
+    // Produces a copy of the current colour
+    rgba.prototype.clone = function(){ 
+      return new rgba(this.r, this.g, this.b, this.a)
+    };
+
+    // Get the hue
+    rgba.prototype.hue = (function(){
+      var cache = memo(360);
+      return function(){
+        var key = ""+this.toString(), cached = cache(key); 
+        if(cached) return cached;
+        var r = this.r, g = this.g, b = this.b;
+        return cache(key, 
+          (r >= g) ? (
+            (r >= b) 
+            ? ((g >= b) 
+              ? 60*(  (g-b)/(r-b)) // r > g > b
+              : 60*(6-(b-g)/(r-g)) // r > b > g
+            ) : 60*(4+(r-g)/(b-g)) // b > r > g
+          ) : (
+            (g >= b)
+            ? ((b >= r) 
+              ? 60*(2+(b-r)/(g-r)) // g > b > r
+              : 60*(2-(r-b)/(g-b)) // g > r > b 
+            ) : 60*(4-(g-r)/(b-r)) // b > g > r
+          )
+        )
+      }
+    })()
+    
+    // Mixes colour with a simple weighted average    
+    rgba.prototype.rgbMix = function(c, weight){
+      var a = this.a + c.a*(1-this.a);
+      var c1 = this.clone(), c2 = c.clone();
+      c1.a = 1 - weight, c2.a = weight;        
+      return new rgba(
+        (c1.r * c1.a  + c2.r * c2.a * (1 - c1.a)) / a,
+        (c1.g * c1.a  + c2.g * c2.a * (1 - c1.a)) / a,
+        (c1.b * c1.a  + c2.b * c2.a * (1 - c1.a)) / a,
+        a
+      )
+    }   
+    
+    // Mixes colour while preserving lightness
+    rgba.prototype.hslMix = function(c, w){
+      w = (w === udef()) ? 0.5 : w;
+      var w2 = 1 - w;
+      var hsl1 = this.toHsla(), hsl2 = c.toHsla();
+      return hsla(
+        w * hsl1[0] + w2 * hsl2[0],
+        w * hsl1[1] + w2 * hsl2[1], 
+        w * hsl1[2] + w2 * hsl2[2],
+        hsl1[3] + hsl2[3]*(1-hsl1[3])
+      )
+    }
+    
+    // Determine which colour the current colour is closest to
+    rgba.prototype.closestTo = function(c1, c2){
+      var h = this.hue(), h1 = c1.hue(), h2 = c2.hue();
+      if(abs(h - h1) < abs(h - h2)) return c1;
+      else return c2
+    }  
+     
+    // Numeric hexidecimal representation
+    rgba.prototype.valueOf = function(){
+      return ( 
+          Math.round(255 * this.r) * 0x10000 
+        + Math.round(255 * this.g) * 0x100 
+        + Math.round(255 * this.b)
+      ).toString(16)
+    }
+    
+    // Same as valueOf, but with a # in front.
+    rgba.prototype.toString = function(){
+      var hex = this.valueOf();
+      return '#' + ('00000'.substr(0, 6 - hex[L])) + hex
+    },
+    
+    // Map colour channels to an array.
+    rgba.prototype.toArray = function(){
+      return [255*this.r, 255*this.g, 255*this.b, 255*this.a]
+    }
+
+    // Map an array to colour object
+    rgba.fromArray = function(ar){
+      return new rgba(ar[0], ar[1], ar[2], ar[3])
+    }
+
+    // Create a new colour using hue/saturation/lightness values.    
+    var hsla = (function(){
+      var cache = memo(255);      
+      return function hsla(h, s, l, a){
+        var key = ""+h+""+s+""+l+""+a+"", cached = cache(key); 
+        if(cached) return cached.clone();
+        
+        var r, g, b;
+        if(s == 0) r = g = b = l; // achromatic
+        else{
+          function hue2rgb(p, q, t){
+            if(t < 0) t += 1; else if(t > 1) t -= 1;
+            if(t < 1/6) return p + (q - p) * 6 * t;
+            if(t < 1/2) return q;
+            if(t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+            return p;
+          }
+          var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+          var p = 2 * l - q;      
+        }
+        return cache(key, new rgba(
+          hue2rgb(p, q, h + 1/3),
+          hue2rgb(p, q, h),
+          hue2rgb(p, q, h - 1/3),
+          a
+        ))
+      }
+    })()
+
+    // Create a map preview
+    function mapPreview(mapFn){
+      var c = make("canvas");
+      c.width = c.height = size;
+      c.style.width = c.style.height = "50px"
+      c.style.margin = "3px";
+      var p = c.getContext("2d")
+      p.fillStyle = "#FFFFFF";
+      p.fillRect(0,0,size,size);
+      var map = {
+        rect: function(x, y, w, h){
+          p.fillStyle = "#000000";
+          for(var xi = x|0; xi < x + w; xi++){
+            for(var yi = y|0; yi < y + h; yi++){
+              p.fillRect(xi, yi, 1, 1)
+            }
+          }
+        }
+      }
+      mapFn(map, size);
+      return c;
+    }
+
+    // Floating html gui
+    var controls = (function(){
+      var controls = byId("controls");
+      var start = byId("startGame");
+      var previewBox = byId("mapPreviews");
+      var selectedMap = null;
+      var mapPreviews = [];
+      for(var i in maps){
+        (function(mapName, mapFn){        
+          var preview = mapPreview(mapFn);
+          listen("click", preview, function(e){
+            each(mapPreviews, function(p){ p.style.border = "none" })
+            e.target.style.border = "3px solid blue";
+            selectedMap = mapName;
+          })
+          mapPreviews.push(preview);
+          previewBox.appendChild(preview);
+        })(i, maps[i]);
+      }
+      listen("click", start, function(){ 
+        var opts = {}        
+        var cpus = parseInt(byId("numCPUs").value)
+        cpus = !isNaN(cpus) && cpus > 0 && cpus < cpuClrs[L] ? cpus : 2;
+        startPoints = parseInt(byId("startPoints").value)
+        startPoints = !isNaN(startPoints) && startPoints > 5 && startPoints < 25 ? startPoints : 10;
+        var fastRc = byId("fastRaycast").checked        
+        controls.style.display = "none" 
+        startGame({numCPUs: cpus, fastRaycast: fastRc, map: maps[selectedMap]})
+      });
+      return controls
+    })();
+
+    
+
+    // Main kick-off for a round of the game
+    // opts = { numCPUs (int), fastRaycast (bool), map (function) } 
+    function startGame(opts){
+      opts = opts || {};
+      opts.numCPUs = opts.numCPUs || 2;
+      opts.fastRaycast = opts.fastRaycast !== udef() ? opts.fastRaycast : true;
+      opts.map = opts.map || defaultMap;
+
+      // Background canvas
+      var back = (function() {
+        var canvas = byId("back");      
+        canvas.width = screen().width/1.5;
+        canvas.height = 1;      
+        return canvas.getContext("2d")      
+      })();
+
+      // Game area canvas
+      var front = (function(){
+        var canvas = byId("front");      
+        var ratio = screen().width / screen().height;
+        canvas.width = 100*ratio;
+        canvas.height = 100;      
+        return canvas.getContext("2d")
+      })();
+
+
+      // Create a new map
+      var map = (function(){
+        var w = size-1, h = size-1;
+        var map = []
+        for(var x = 0; x <= w; x++){
+          var mapx = []; map.push(mapx);        
+          for(var y = 0; y <= h; y++){
+            if (x == 0 || x == w || y == 0 || y == h) mapx.push(null)
+            else mapx.push(undefined)
+          }
+        }
+        
+        // draw a rect to the map
+        function rect(x, y, w, h, c, p){
+          c = c || null;      
+          for(var xi = x|0; xi < x + w; xi++){
+            for(var yi = y|0; yi < y + h; yi++){
+              if(c && p){ 
+                c = c.clone();
+                c.player = p;
+                p.points.push({x: xi, y: yi, c: c});            
+              }
+              map[xi][yi] = c 
+            }
+          }
+        }
+                
+        // cast a single ray
+        var ray = (function(){
+          
+          function vert(xo, yo, m, R, map){
+            var dx = R ? 1 : -1, dy = dx * m;
+            var x = R ? Math.ceil(xo) : xo|0, y = yo + (x - xo) * m;
+            var ray = []; ray.dist = Infinity;
+            while (x >= 0 && x < size && y >= 0 && y < size) {
+              var at = map[(x + (R ? 0 : -1))|0][y|0];
+              if(at === null){
+                ray.dist = distxy(xo, yo, x, y);
+                break
+              }
+              ray.push({x: x, y: y, r:at});
+              x += dx; y += dy
+            }
+            return ray
+          }
+          
+          function horiz(xo, yo, m, U, map){
+            var dy = U ? -1 : 1, dx = dy * m;          
+            var y = U ? yo|0 : Math.ceil(yo), x = xo + (y - yo) * m;
+            var ray = []; ray.dist = Infinity;
+            while (x >= 0 && x < size && y >= 0 && y < size) {
+              var at = map[x|0][(y + (U ? -1 : 0))|0];
+              if(at === null){
+                ray.dist = distxy(xo, yo, x, y);
+                break
+              }
+              ray.push({x: x, y: y, r:at});
+              x += dx, y += dy;
+            }
+            return ray
+          }
+          
+        
+          return function ray(xo, yo, v){
+            // normalize angle
+            v %= PI2; if (v < 0) v += PI2;            
+            // right/left, up/down?
+            var R = (v > PI2 * 0.75 || v < PI2 * 0.25), U = (v < 0 || v > PI);
+            
+            var cosv = cos(v), sinv = sin(v);
+            var dist = 0;
+            
+            var vray = vert(xo, yo, sinv/cosv, R, map);
+            var hray = horiz(xo, yo, cosv/sinv, U, map);
+            
+            var dist = Math.min(vray.dist, hray.dist);
+            var ray = vray.concat(hray);
+            
+            
+            var sortX = R?1:-1, sortY = U?1:-1;
+            ray.sort(function(r1, r2){
+              return (sortX)*(r2.x - r1.x) - (sortY)*(r2.y - r1.y);
+            }) //:/
+            
+            for(var i = 0; i < ray[L]; i++){
+              var r = ray[i];              
+              if(distxy(xo, yo, r.x, r.y) > dist){
+                ray.splice(i, 1); i--;
+                continue
+              } else ray[i] = r.r
+            }
+            
+            return {x: xo, y: yo, v: v, dist: dist, ray: ray}; 
+          }
+          
+        })();
+        
+        var rayFast = function (x, y, v){
+          var ray = []
+          var cosv = Math.cos(v), sinv = Math.sin(v);
+          for (
+            var d = 0, at = this.get(x, y);             
+            d < viewDistance && at !== null; 
+            d++, at = this.get(x+=cosv, y+=sinv)
+          ){ ray.push(at); }
+          return {x: x, y: y, v: v, dist: d, ray: ray.reverse()};
+        }
+        
+        // map interface
+        return {
+          get: function(x, y){ return map[x|x][y|y] },
+          set: function(x, y, val){ map[x|x][y|y] = val },
+          width: function(){ return w; },
+          height: function(){ return h; },
+          rect: rect,
+          ray: opts.fastRaycast ? rayFast : ray
+        }
+        
+      })();
+
+      // Apply the chosen map generator function
+      opts.map(map, size)
+      
+
+      // Define players, human or otherwise.
+      var players = [];    
+      function Player(clr, ai){
+        players.push(this);    
+        this.points = [];
+        this.clr = clr;
+        this.s = 0; // speed
+        this.l = 0; // lateral speed
+        this.t = 0; // turning
+        this.v = -PI/2; // starting direction (up)
+        var sp = startPoints, sp2 = startPoints / 2;
+        do {
+          this.x = sp + rand()*(size-30);
+          this.y = sp + rand()*(size-30);          
+        } while (
+          map.get(this.x, this.y) !== udef()
+          || map.get(this.x + sp2, this.y + sp2) !== udef()
+          || map.get(this.x + sp2, this.y - sp2) !== udef()
+          || map.get(this.x - sp2, this.y + sp2) !== udef()
+          || map.get(this.x - sp2, this.y - sp2) !== udef()
+        );
+        
+        map.rect(this.x - sp2, this.y - sp2, sp, sp, clr, this);
+        // note the coupling with map.rect to add colours to player.points
+        
+        this.points = rando(this.points);      
+        
+        // monkey patch a point transfer handler.
+        this.points.transfer = function(x, y, player){
+          for(var i = 0, l = this[L]; i < l; i++){
+            var pt = this[i];
+            if(pt.x == x && pt.y == y){
+              pt.c.player = player;
+              player.points.push(this.splice(i, 1)[0]);          
+              break;
+            }
+          }
+        }
+        
+        
+        // Update player position and move points
+        this.tick = (function(){
+          var ts = (new Date()).getTime();                    
+          return function(now){
+            // get keyboard input or cpu-logic
+            ai.call(this);
+            // roughly 20units/second movement speed (1000/50)    
+            t = (now-ts)/40, ts = now;       
+            this.playerMove(t);
+            this.pointMove(t);
+          }
+        })();
+      }
+      
+      Player.prototype.playerMove = function(t){
+        var d90 = rad(90);
+        // turning around is always allowed
+        this.v += this.t/(2*PI2)*t;
+        this.v %= PI2; 
+        if (this.v < 0) this.v += PI2;        
+        // moving and strafing
+        var x = this.x, y = this.y, s = this.s, l = this.l, v = this.v;        
+        x = box(x + (((s * cos(v)) + (l * cos(v+d90)))) * t, map.width());
+        y = box(y + (((s * sin(v)) + (l * sin(v+d90)))) * t, map.height());
+        // collision detection
+        if(map.get(x,y) !== null){
+          this.x = x, this.y = y;
+        } else if (map.get(this.x,y) !== null){
+          this.y = y;
+        } else if (map.get(x,this.y) !== null){
+          this.x = x;
+        }
+      }
+            
+      // point movements      
+      Player.prototype.pointMove = function(t){
+        var pl = this.points[L];
+        var xo = this.x, yo = this.y, co = this.clr;            
+        // 'this' refers to the current player.
+        var n = (t*pl)|0; // # of point moves to make rel to fps
+        if(n > pl*2) n = pl*2; // Help prevents random fps degregations
+        for(var m = false; n > 0; n -= 1, m = false){
+          var p = this.points.shift(), px; // evenly cycle through points
+          var d = distxy(p.x, p.y, xo, yo); // current distance to player
+          var xm = rando([p.x-1,p.x,p.x+1]); 
+          var ym = rando([p.y-1,p.y,p.y+1]); // get nice gloopy movements.                                   
+          for (var i = 0, xi = xm[i]; !m && i < 3; xi = xm[++i]){
+            for (var j = 0, yi = ym[j]; !m && j < 3; yi = ym[++j]){
+              m = this.pointMoveLogic(p, xo, yo, xi, yi, d, co);
+            }            
+          }
+          this.points.push(p)
+        };
+      }
+      
+      // interactions between points
+      Player.prototype.pointMoveLogic = function(p, xo, yo, xi, yi, d, co){
+        if(distxy(xi, yi, xo, yo) <= d){
+          if((px = map.get(xi,yi)) === udef()){ 
+            // space is open and is closer to player, move there.
+            map.set(xi, yi, map.get(p.x, p.y));
+            map.set(p.x, p.y, udef());
+            p.x = xi; p.y = yi;
+            return true;
+          } else if (px){ 
+            // space is a player point.
+            // mix colour in, restores player's base colour as well.
+            var mix = px.hslMix(p.c.hslMix(co, 0.90), 0.5);                      
+            px.r = mix.r, px.g = mix.g, px.b = mix.b; 
+            if(px.player !== this){
+              // when we have transformed another player's point, claim it.
+              if(px.closestTo(px.player.clr, co) === co){
+                px.player.points.transfer(xi, yi, this) 
+              }
+            }
+            return true;
+          } 
+        }
+        return false;
+      }
+      
+      // Some functions for the 'ai' to call.
+      Player.prototype.move = function(s){ this.s = box((s+this.s)/2, 1, -1) } 
+      Player.prototype.strafe = function(l){ this.l = box((l+this.l)/2, 1, -1) }
+      Player.prototype.turn = function(t){ this.t = box((t+this.t)/2, 1, -1) }
+      
+      
+      // Keyboard mappings
+      var you = new Player(rgba.fromArray(playerClr), function(){
+        var key = keyboard;
+        // forwards/backwards
+        if(key.UP || key.W) this.move(1);
+        if(key.DOWN || key.S) this.move(-1);
+        if(!(key.UP || key.DOWN || key.W || key.S )) this.move(0);
+        // left/right
+        if(key.A) this.strafe(-1);
+        if(key.D) this.strafe(1);
+        if(!(key.A || key.D)) this.strafe(0);
+        // turning
+        if(keyboard.LEFT || keyboard.Q) this.turn(-1)
+        if(keyboard.RIGHT || keyboard.E) this.turn(1)
+        if(!(key.LEFT || key.RIGHT || key.Q || key.E )) this.turn(0);
+      })      
+      
+      // Set up computer opponents
+      var cpus = cpuClrs.slice(0, opts.numCPUs);
+      for(var ai in cpus){
+        cpus[ai] = new Player(rgba.fromArray(cpus[ai]), (function(){          
+          // shared locals for speed/lateral/turning
+          var s = 0, l = 0, t = 0, p, me;
+          
+          // pick out a player to attack            
+          function getTarget(){           
+            var ps = rando(players)
+            for(var i = 0; i < ps[L]; i++){ 
+              p = ps[i]
+              if(p !== me && p.points[L] > 0) break;
+            }            
+          } 
+          intervals.push(setInterval(function(){ // Cpu AI
+            // get a new target player if there isn't one,
+            // if the current one has been defeated, or every ~10s
+            if(!p || p.points[L] == 0 || rand() < 0.13) getTarget();
+            // Grab a few points which belong to the target
+            var pts = p.points.slice(0, 13), x = 0, y = 0, n = 0, pt;
+            // average the coordinates and determine distance and angle
+            while(pt = pts.pop()){ x += pt.x; y += pt.y; n++; }            
+            var dx = (x/n) - me.x, dy = (y/n) - me.y;            
+            var v = atan2(dy,dx), dv = atan2(sin(v - me.v), cos(v - me.v))                        
+            // apply the calculations
+            s = (sq(dx)+sq(dy)) / size;
+            l = rand()-0.5;
+            t = dv > 0 ? 1 : -1;
+            //me.v = v;
+          }, 420));
+          return function(){
+            me = this; // Workaround - 'this' is unknown till first invocation
+            this.move(s); this.strafe(l); this.turn(t); // use the local values
+          }
+        })())      
+      }
+
+      // Render a background frame
+      var raycast = (function(player){      
+        var white = rgba(0.96,0.98,0.99,1);
+        var black = rgba(0.04,0.02,0.02,1);
+        var b = back;
+        return function(){
+          var rayWidth = fov / back.canvas.width;
+          var from = player.v - fov/2, to = player.v + fov/2;
+          var px = b.getImageData(0, 0, b.canvas.width, 1), p = px.data;
+          var dist = 0;          
+          for (var x = 0, v = from; v <= to; x++, v += rayWidth) {
+            // cast a ray for every column of the canvas
+            var ray = map.ray(player.x, player.y, v);            
+            // first apply shading based on depth
+            var ptx = black.rgbMix(white, ray.dist/viewDistance);
+            // then trace the ray and colourize player points. 
+            for (var r, i = 0, l = ray.ray[L]; i < l; i++){
+              if((r = ray.ray[i])) ptx = ptx.rgbMix(r, 0.25)
+            }            
+            ptx = ptx.toArray()
+            for (var c = 0; c < 4; c++){
+              p[x*4+c] = ptx[c]
+            }          
+            dist = Math.max(50, dist, ray.dist);
+          }          
+          b.putImageData(px, 0, 0)                    
+          viewDistance = dist + 10; 
+        }
+      })(you)
+      
+      // Render a frame of the game area
+      var draw = (function(player){
+        var f = front;     
+        var w = f.canvas.width, h = f.canvas.height;
+        var w2 = w/2, h2 = h/2; // front width/height / 2                
+        function drawMarker(p){
+          // translate the player coordinates to our viewbox
+          var x = p.x-player.x+w2, y = p.y-player.y+h2;
+          if(x > 0 && x < w && y > 0 && y < h){
+            // draw player's dot
+            f.strokeStyle = f.fillStyle
+              = p.clr.rgbMix(rgba(1,1,1), 0.75).toString();          
+            f.fillRect(x-1, y-1, 2, 2)
+            f.beginPath()
+            f.moveTo(x, y)
+            f.lineTo(x + 3*cos(p.v), y + 3*sin(p.v))        
+            f.stroke()            
+          }
+        }
+        // draw walls and points
+        function drawMap(){
+          f.fillStyle = "white"
+          var px = f.getImageData(0, 0, w, h), p = px.data;
+          for (var i = 0, y = (player.y-h2); y < (player.y+h2); y++){                     
+            for (x = (player.x-w2); x < (player.x+w2); x++, i++){              
+              var at = map.get(
+                box(x, map.width()), 
+                box(y, map.height())
+              )
+              var clr = at ? at.toArray() : false;
+              for(var c = 0; c < 4; c++){                
+                if (at === null) p[i*4+c] = 255; // walls
+                else if (clr) p[i*4+c] = clr[c]; // points
+                else p[i*4+c] = 0; // empty
+              }
+            }
+          }        
+          f.putImageData(px, 0, 0)        
+        }
+        
+        return function(){      
+          f.clearRect(0, 0, w, h);
+          drawMap();
+          //each(players, drawMarker);
+          drawMarker(player);
+        }
+      })(you)
+
+      function winCheck(){
+        var wPts = [];
+        each(players, function(p){ 
+          if (p.points[L] > 0){
+            wPts.push(p);
+          }
+        })
+        if(wPts[L] === 1){
+          if(wPts[0] === you){
+            alert("Yay! You won!")
+          } else {
+            alert("Oh noes! You lost.")
+          }
+          teardown();
+        }
+      }
+
+      // Begin the render loop
+      var run = true;
+      var frame = 0;      
+      Y(function(f){ 
+        var e = 'equestAnimationFrame';
+        var next = window['r'+e]
+          ||  window['mozR'+e]
+          ||  window['webkitR'+e]
+          ||  window['msR'+e]
+          ||  function(fn){ setTimeout(fn, 50) }
+        return function(){
+          if(run){         
+            var now = (new Date()).getTime();
+            each(players, function(p){ p.tick(now) });
+            raycast(); 
+            draw();
+            if(frame%10==0) winCheck(); 
+            next(f)
+            frame++;
+          }
+        }
+      })()
+      // Shutdown
+      function teardown(){
+        run = false;
+        controls.style.display = "block";
+        var ti;         
+        while(ti = intervals.pop()){ clearInterval(ti); }
+      }
+    }
+
+    /* 
+     * Huge thanks to the following resources
+     *
+     * http://mjijackson.com/2008/02/rgb-to-hsl-and-rgb-to-hsv-color-model-conversion-algorithms-in-javascript
+     * http://dev.opera.com/articles/view/creating-pseudo-3d-games-with-html-5-can-1/
+     */
+  
+  })(window, document);
+  
+  </script>
+</body>
+</html>
