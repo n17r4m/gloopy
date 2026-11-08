@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Gloopy</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { touch-action: none; -webkit-user-select: none; user-select: none; }
+  canvas.fs { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #front { image-rendering: pixelated; image-rendering: crisp-edges; }
+  #hud { position: absolute; top: 8px; left: 8px; right: 8px; height: 6px;
+         display: none; gap: 2px; pointer-events: none; }
+  #hud div { height: 100%; min-width: 0; }
+  #menu { position: absolute; inset: 0; display: flex; overflow: auto;
+          padding: 16px; box-sizing: border-box; background: rgba(0,0,0,.35);
+          font-family: system-ui, sans-serif; color: #eee; }
+  .card { background: #123; padding: .5em 1.5em 1.5em; max-width: 24em; width: 100%;
+          margin: auto; text-align: center; box-sizing: border-box; }
+  .card h1 { margin: .4em 0 0; }
+  .card a { color: #fff; }
+  #result { font-size: 1.4em; font-weight: bold; min-height: 0; margin: .5em 0; }
+  #result:empty { display: none; }
+  fieldset { border: 1px solid #456; margin: .8em 0; text-align: left; }
+  table { width: 100%; font-size: .9em; }
+  td:last-child { text-align: right; color: #abc; }
+  #maps { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+  #maps button { padding: 0; border: 3px solid transparent; background: none; cursor: pointer;
+                 display: flex; flex-direction: column; align-items: center; color: #ccd; font-size: .75em; }
+  #maps button[aria-pressed="true"] { border-color: #4af; }
+  #maps canvas { width: 50px; height: 50px; image-rendering: pixelated; }
+  label { display: block; margin: .3em 0; }
+  input[type=number] { width: 3.5em; }
+  #start { font-size: x-large; margin-top: .3em; padding: .2em 1em; }
+  .hint { font-size: .8em; color: #9ab; }
+</style>
+</head>
+<body>
+<canvas id="back" class="fs"></canvas>
+<canvas id="front" class="fs"></canvas>
+<div id="hud"></div>
+<div id="menu">
+  <div class="card">
+    <h1>Gloopy</h1>
+    <p>A HTML5/Canvas <a href="https://en.wikipedia.org/wiki/Liquid_War">Liquid War</a><br>
+       by <a href="http://mygen.ca">Martin Humphreys</a> &middot; 2012, restarted 2026</p>
+    <div id="result"></div>
+    <fieldset>
+      <legend>Controls</legend>
+      <table>
+        <tr><td>Up / W</td><td>Forward</td></tr>
+        <tr><td>Down / S</td><td>Backwards</td></tr>
+        <tr><td>Left / Q</td><td>Turn left</td></tr>
+        <tr><td>Right / E</td><td>Turn right</td></tr>
+        <tr><td>A / D</td><td>Strafe</td></tr>
+        <tr><td>Esc</td><td>Quit to menu</td></tr>
+      </table>
+      <div class="hint">Touch: drag on the left half to move and strafe, on the right half to move and turn.</div>
+    </fieldset>
+    <fieldset>
+      <legend>Map</legend>
+      <div id="maps"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Options</legend>
+      <label><input id="numCPUs" type="number" min="1" max="13" value="5"> Opponents (1&ndash;13)</label>
+      <label><input id="startPoints" type="number" min="5" max="25" value="10"> Blob size (5&ndash;25)</label>
+    </fieldset>
+    <button id="start">Start Game</button>
+  </div>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  // ---- constants -----------------------------------------------------------
+  const N = 200;                       // map is N x N cells
+  const FOV = 75 * Math.PI / 180;
+  const TAU = Math.PI * 2;
+  const WALL = -1, EMPTY = 0;          // grid values; >0 means point index + 1
+  const INF = 0x3fffffff;
+  const MAX_POINTS = 14 * 25 * 25;
+  const WHITE = 0xffffffff;
+  const HIT = .2;                      // how far one bump tints a point (lower = longer fights)
+
+  const PLAYER_RGB = [0, 0, 1];
+  const CPU_RGB = [
+    [1, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 1], [1, .5, 0], [.5, 1, 0],
+    [.5, 0, 0], [0, .5, 0], [.5, .5, 0], [.5, 0, .5], [.5, .25, 0],
+    [0, .5, .5], [.5, .5, .5]
+  ];
+
+  const $ = id => document.getElementById(id);
+  const clamp = (n, lo, hi) => n < lo ? lo : n > hi ? hi : n;
+  const rand = Math.random;
+
+  // ---- colour --------------------------------------------------------------
+  function rgbToHsl(r, g, b) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+    let h = 0, s = 0;
+    if (max !== min) {
+      const d = max - min;
+      s = l > .5 ? d / (2 - max - min) : d / (max + min);
+      h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+      h /= 6;
+    }
+    return [h, s, l];
+  }
+  function hue2rgb(p, q, t) {
+    if (t < 0) t += 1; else if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  }
+  function hslToRgb(h, s, l, out) {
+    if (s === 0) { out[0] = out[1] = out[2] = l; return out; }
+    const q = l < .5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+    out[0] = hue2rgb(p, q, h + 1 / 3);
+    out[1] = hue2rgb(p, q, h);
+    out[2] = hue2rgb(p, q, h - 1 / 3);
+    return out;
+  }
+  // Mix two HSL colours. Hue is averaged around the colour wheel (weighted by
+  // saturation so greys don't drag the hue around); s and l mix linearly.
+  function mixHsl(out, h1, s1, l1, h2, s2, l2, w) {
+    const w2 = 1 - w, a1 = h1 * TAU, a2 = h2 * TAU;
+    const x = w * s1 * Math.cos(a1) + w2 * s2 * Math.cos(a2);
+    const y = w * s1 * Math.sin(a1) + w2 * s2 * Math.sin(a2);
+    let h = Math.atan2(y, x) / TAU;
+    if (h < 0) h += 1;
+    out[0] = h; out[1] = w * s1 + w2 * s2; out[2] = w * l1 + w2 * l2;
+    return out;
+  }
+  const css = (r, g, b) => `rgb(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0})`;
+
+  // ---- maps ----------------------------------------------------------------
+  const MAPS = {
+    Box(rect, size) {
+      for (let i = 1; i < 5; i++)
+        for (let j = 1; j < 5; j++) rect(i * size / 5 - 13, j * size / 5 - 13, 26, 26);
+    },
+    Pillr(rect, size) {
+      const x = size / 8;
+      rect(x, x, size - x * 2, x);
+      rect(x, size - x * 2, size - x * 2, x);
+      rect(x, x * 3, x, size - x * 5);
+      rect(size - x * 2, x * 2, x, size - x * 5);
+      rect(size / 2 - x, size / 2 - x, x * 2, x * 2);
+    },
+    E(rect, size) {
+      const x = size / 8;
+      rect(x / 1.5, x, x, size - x * 2);
+      rect(x * 2.5, x, size - x * 3, x);
+      rect(x * 2.5, x * 3, size - x * 2.5, x * 2);
+      rect(x * 2.5, x * 6, size - x * 3, x);
+    },
+    Arena(rect, size) {
+      const x = size / 8;
+      rect(size - x * 1.25, x * .25, x, size - x * .5);
+      rect(x * .25, size - x * 1.25, size - x * .5, x);
+      rect(x * .25, x * .25, x, size - x * .5);
+      rect(x * .25, x * .25, size - x * .5, x);
+    },
+    // Commented out in 2012; back by popular demand.
+    Arena2(rect, size) {
+      const x = size / 8;
+      MAPS.Arena(rect, size);
+      rect(x * 2.25, x * 2.25, x, x);
+      rect(size - x * 3.25, x * 2.25, x, x);
+      rect(x * 2.25, size - x * 3.25, x, x);
+      rect(size - x * 3.25, size - x * 3.25, x, x);
+      rect(size / 2 - x / 2, size / 2 - x / 2, x, x);
+    },
+    Checkrs(rect, size) {
+      const s = size / 8;
+      for (let x = 0; x < 8; x++)
+        for (let y = 0; y < 8; y++)
+          if ((x + y) % 2) rect(1 + x * s, 1 + y * s, s - 2, s - 2);
+    }
+  };
+
+  // ---- world state (flat typed arrays) -------------------------------------
+  const grid = new Int32Array(N * N);
+  // 8 neighbours in ring order, with chamfer costs (5 straight, 7 diagonal ~ 5*sqrt2)
+  const NOFF = [1, N + 1, N, N - 1, -1, -N - 1, -N, -N + 1];
+  const NCOST = [5, 7, 5, 7, 5, 7, 5, 7];
+
+  const ptX = new Int16Array(MAX_POINTS), ptY = new Int16Array(MAX_POINTS);
+  const ptOwner = new Uint8Array(MAX_POINTS), ptSlot = new Int32Array(MAX_POINTS);
+  const ptH = new Float32Array(MAX_POINTS), ptS = new Float32Array(MAX_POINTS), ptL = new Float32Array(MAX_POINTS);
+  const ptR = new Float32Array(MAX_POINTS), ptG = new Float32Array(MAX_POINTS), ptB = new Float32Array(MAX_POINTS);
+  const ptRGB = new Uint32Array(MAX_POINTS);   // packed for ImageData (little-endian ABGR)
+  let nPoints = 0;
+
+  const tmpRgb = [0, 0, 0], tmpHsl = [0, 0, 0];
+  function setColour(pt, h, s, l) {
+    ptH[pt] = h; ptS[pt] = s; ptL[pt] = l;
+    hslToRgb(h, s, l, tmpRgb);
+    const r = ptR[pt] = tmpRgb[0], g = ptG[pt] = tmpRgb[1], b = ptB[pt] = tmpRgb[2];
+    ptRGB[pt] = (0xff000000 | ((b * 255) << 16) | ((g * 255) << 8) | (r * 255)) >>> 0;
+  }
+
+  function buildMap(fn) {
+    grid.fill(EMPTY);
+    for (let i = 0; i < N; i++) grid[i] = grid[(N - 1) * N + i] = grid[i * N] = grid[i * N + N - 1] = WALL;
+    fn((x, y, w, h) => {
+      for (let yi = y | 0; yi < y + h; yi++)
+        for (let xi = x | 0; xi < x + w; xi++)
+          if (xi >= 0 && xi < N && yi >= 0 && yi < N) grid[yi * N + xi] = WALL;
+    }, N);
+  }
+  const isWall = (x, y) => grid[(y | 0) * N + (x | 0)] === WALL;
+
+  // ---- players -------------------------------------------------------------
+  let players = [];
+
+  function makePlayer(idx, rgb, brain) {
+    const [h, s, l] = rgbToHsl(rgb[0], rgb[1], rgb[2]);
+    return {
+      idx, brain, br: rgb[0], bg: rgb[1], bb: rgb[2], bh: h, bs: s, bl: l,
+      marker: css(rgb[0] * .25 + .75, rgb[1] * .25 + .75, rgb[2] * .25 + .75),
+      list: new Int32Array(MAX_POINTS), count: 0, cursor: 0, acc: 0,
+      dist: new Int32Array(N * N),
+      x: 0, y: 0, v: -Math.PI / 2, spd: 0, lat: 0, rot: 0
+    };
+  }
+
+  function spawn(p, sp) {
+    for (let tries = 0; tries < 10000; tries++) {
+      const x0 = 1 + (rand() * (N - 2 - sp)) | 0, y0 = 1 + (rand() * (N - 2 - sp)) | 0;
+      let free = true;
+      for (let y = y0; free && y < y0 + sp; y++)
+        for (let x = x0; x < x0 + sp; x++) if (grid[y * N + x] !== EMPTY) { free = false; break; }
+      if (!free) continue;
+      for (let y = y0; y < y0 + sp; y++)
+        for (let x = x0; x < x0 + sp; x++) {
+          const pt = nPoints++;
+          ptX[pt] = x; ptY[pt] = y; ptOwner[pt] = p.idx;
+          setColour(pt, p.bh, p.bs, p.bl);
+          grid[y * N + x] = pt + 1;
+          ptSlot[pt] = p.count; p.list[p.count++] = pt;
+        }
+      // shuffle so points get updated in a nicely gloopy order
+      for (let i = p.count - 1; i > 0; i--) {
+        const j = (rand() * (i + 1)) | 0, a = p.list[i], b = p.list[j];
+        p.list[i] = b; p.list[j] = a; ptSlot[b] = i; ptSlot[a] = j;
+      }
+      p.x = x0 + sp / 2; p.y = y0 + sp / 2;
+      return true;
+    }
+    return false;
+  }
+
+  // O(1) swap-remove hand-over of a point between players
+  function transfer(pt, from, to) {
+    const slot = ptSlot[pt], last = from.list[--from.count];
+    from.list[slot] = last; ptSlot[last] = slot;
+    ptSlot[pt] = to.count; to.list[to.count++] = pt;
+    ptOwner[pt] = to.idx;
+  }
+
+  // Distance field from a player's cursor around the walls (Dial's algorithm,
+  // chamfer 5/7 costs). This is what makes the goo flow around obstacles
+  // instead of piling up against them like it did in 2012.
+  const buckets = Array.from({ length: 8 }, () => []);
+  function flood(p) {
+    const d = p.dist;
+    d.fill(INF);
+    const start = (p.y | 0) * N + (p.x | 0);
+    d[start] = 0; buckets[0].push(start);
+    let pending = 1;
+    for (let cur = 0; pending > 0; cur++) {
+      const b = buckets[cur & 7];
+      for (let k = 0; k < b.length; k++) {
+        pending--;
+        const i = b[k], di = d[i];
+        if (di !== cur) continue; // stale entry
+        for (let n = 0; n < 8; n++) {
+          const j = i + NOFF[n];
+          if (grid[j] === WALL) continue;
+          const nd = di + NCOST[n];
+          if (nd < d[j]) { d[j] = nd; buckets[nd & 7].push(j); pending++; }
+        }
+      }
+      b.length = 0;
+    }
+  }
+
+  // A point bumps into another point: tint it towards our colour, and steal it
+  // once it looks more like us than like its owner.
+  function interact(p, pt, q) {
+    mixHsl(tmpHsl, ptH[pt], ptS[pt], ptL[pt], p.bh, p.bs, p.bl, .9);
+    mixHsl(tmpHsl, ptH[q], ptS[q], ptL[q], tmpHsl[0], tmpHsl[1], tmpHsl[2], 1 - HIT);
+    setColour(q, tmpHsl[0], tmpHsl[1], tmpHsl[2]);
+    const o = players[ptOwner[q]];
+    if (o !== p) {
+      const r = ptR[q], g = ptG[q], b = ptB[q];
+      const dMe = (r - p.br) ** 2 + (g - p.bg) ** 2 + (b - p.bb) ** 2;
+      const dThem = (r - o.br) ** 2 + (g - o.bg) ** 2 + (b - o.bb) ** 2;
+      if (dMe < dThem) transfer(q, o, p);
+    }
+  }
+
+  function movePoints(p, t) {
+    p.acc += t * p.count;
+    let n = Math.min(p.acc | 0, p.count * 2);
+    p.acc -= p.acc | 0;
+    const dist = p.dist;
+    while (n-- > 0 && p.count > 0) {
+      if (p.cursor >= p.count) p.cursor = 0;
+      const pt = p.list[p.cursor++];
+      const i = ptY[pt] * N + ptX[pt], di = dist[i];
+      const r0 = (rand() * 8) | 0, dir = rand() < .5 ? 1 : 7;
+      // Like 2012: look around in a random order and act on the first
+      // neighbour that isn't further from the cursor. Free cell: flow into it.
+      // Someone's point: bump it (tints enemies, heals friends).
+      for (let k = 0; k < 8; k++) {
+        const j = i + NOFF[(r0 + k * dir) & 7], g = grid[j];
+        if (g === WALL || dist[j] > di) continue;
+        if (g === EMPTY) {
+          grid[j] = pt + 1; grid[i] = EMPTY;
+          ptX[pt] = j % N; ptY[pt] = (j / N) | 0;
+        } else interact(p, pt, g - 1);
+        break;
+      }
+    }
+  }
+
+  function steer(p, spd, lat, rot) {
+    p.spd = clamp((spd + p.spd) / 2, -1, 1);
+    p.lat = clamp((lat + p.lat) / 2, -1, 1);
+    p.rot = clamp((rot + p.rot) / 2, -1, 1);
+  }
+
+  function movePlayer(p, t) {
+    p.v += p.rot / (2 * TAU) * t;
+    p.v = ((p.v % TAU) + TAU) % TAU;
+    const c = Math.cos(p.v), s = Math.sin(p.v);
+    const nx = clamp(p.x + (p.spd * c - p.lat * s) * t, 0, N - 1);
+    const ny = clamp(p.y + (p.spd * s + p.lat * c) * t, 0, N - 1);
+    if (!isWall(nx, ny)) { p.x = nx; p.y = ny; }
+    else if (!isWall(p.x, ny)) p.y = ny;
+    else if (!isWall(nx, p.y)) p.x = nx;
+  }
+
+  // ---- brains --------------------------------------------------------------
+  const keys = new Set();
+  const touch = { move: 0, strafe: 0, turn: 0 };
+  const held = (...codes) => codes.some(c => keys.has(c)) ? 1 : 0;
+
+  function humanBrain(p) {
+    steer(p,
+      clamp(held('ArrowUp', 'KeyW') - held('ArrowDown', 'KeyS') + touch.move, -1, 1),
+      clamp(held('KeyD') - held('KeyA') + touch.strafe, -1, 1),
+      clamp(held('ArrowRight', 'KeyE') - held('ArrowLeft', 'KeyQ') + touch.turn, -1, 1));
+  }
+
+  function cpuBrain() {
+    let target = null, spd = 0, lat = 0, rot = 0, timer = 0;
+    return function (p, dtMs) {
+      timer -= dtMs;
+      if (timer <= 0) {
+        timer = 420;
+        // new target if none, if it was defeated, or every ~3s on average
+        if (!target || target.count === 0 || rand() < .13) {
+          const others = players.filter(q => q !== p && q.count > 0);
+          target = others.length ? others[(rand() * others.length) | 0] : null;
+        }
+        if (target) {
+          let sx = 0, sy = 0;
+          const k = Math.min(13, target.count);
+          for (let i = 0; i < k; i++) {
+            const pt = target.list[(rand() * target.count) | 0];
+            sx += ptX[pt]; sy += ptY[pt];
+          }
+          const dx = sx / k - p.x, dy = sy / k - p.y;
+          const a = Math.atan2(dy, dx), dv = Math.atan2(Math.sin(a - p.v), Math.cos(a - p.v));
+          spd = (dx * dx + dy * dy) / N;
+          lat = rand() - .5;
+          rot = clamp(dv * 2, -1, 1);
+        }
+      }
+      steer(p, spd, lat, rot);
+    };
+  }
+
+  // ---- rendering -----------------------------------------------------------
+  const backCanvas = $('back'), frontCanvas = $('front');
+  const backCtx = backCanvas.getContext('2d'), frontCtx = frontCanvas.getContext('2d');
+  let backImg, frontImg, frontU32, viewDist = 150;
+  const rayBuf = new Int32Array(1024);
+
+  function sizeCanvases() {
+    backCanvas.width = clamp(Math.round(innerWidth / 1.5), 64, 900);
+    backCanvas.height = 1;
+    backImg = backCtx.createImageData(backCanvas.width, 1);
+    // the shorter side of the screen always shows 100 cells
+    const ratio = innerWidth / innerHeight;
+    frontCanvas.width = Math.max(1, Math.round(ratio >= 1 ? 100 * ratio : 100));
+    frontCanvas.height = Math.max(1, Math.round(ratio >= 1 ? 100 : 100 / ratio));
+    frontImg = frontCtx.createImageData(frontCanvas.width, frontCanvas.height);
+    frontU32 = new Uint32Array(frontImg.data.buffer);
+  }
+
+  // One ray per column of a 1px-tall strip that's stretched over the whole
+  // screen. It shows through wherever the floor of the top-down map is empty.
+  function raycast(p) {
+    const W = backCanvas.width, d = backImg.data, step = FOV / W;
+    let maxd = 0;
+    for (let col = 0; col < W; col++) {
+      const v = p.v - FOV / 2 + (col + .5) * step, c = Math.cos(v), s = Math.sin(v);
+      let x = p.x, y = p.y, n = 0, dist = 0;
+      for (; dist < viewDist; dist++, x += c, y += s) {
+        const g = grid[(y | 0) * N + (x | 0)];
+        if (g === WALL) break;
+        if (g > 0 && n < 1024) rayBuf[n++] = g - 1;
+      }
+      const f = dist / viewDist, f2 = f * f;
+      let r = .04 * (1 - f) + .96 * f2, g = .02 * (1 - f) + .98 * f2, b = .02 * (1 - f) + .99 * f2;
+      for (let k = n - 1; k >= 0; k--) { // far to near
+        const pt = rayBuf[k];
+        r = r * .88 + ptR[pt] * .12; g = g * .88 + ptG[pt] * .12; b = b * .88 + ptB[pt] * .12;
+      }
+      const o = col * 4;
+      d[o] = r * 255; d[o + 1] = g * 255; d[o + 2] = b * 255; d[o + 3] = 255;
+      if (dist > maxd) maxd = dist;
+    }
+    backCtx.putImageData(backImg, 0, 0);
+    viewDist = Math.min(Math.max(50, maxd) + 10, N * 1.5);
+  }
+
+  function drawMap(p) {
+    const W = frontCanvas.width, H = frontCanvas.height, u = frontU32;
+    const x0 = Math.round(p.x - W / 2), y0 = Math.round(p.y - H / 2);
+    for (let y = 0, i = 0; y < H; y++) {
+      const gy = y0 + y, row = gy * N;
+      for (let x = 0; x < W; x++, i++) {
+        const gx = x0 + x;
+        if (gx < 0 || gy < 0 || gx >= N || gy >= N) { u[i] = WHITE; continue; }
+        const g = grid[row + gx];
+        u[i] = g === WALL ? WHITE : g === EMPTY ? 0 : ptRGB[g - 1];
+      }
+    }
+    frontCtx.putImageData(frontImg, 0, 0);
+    frontCtx.lineWidth = 1;
+    for (const q of players) {
+      if (q !== p && q.count === 0) continue;
+      const x = q.x - x0, y = q.y - y0;
+      if (x < 0 || y < 0 || x > W || y > H) continue;
+      frontCtx.fillStyle = frontCtx.strokeStyle = q.marker;
+      frontCtx.fillRect(x - 1, y - 1, 2, 2);
+      frontCtx.beginPath();
+      frontCtx.moveTo(x, y);
+      frontCtx.lineTo(x + 3 * Math.cos(q.v), y + 3 * Math.sin(q.v));
+      frontCtx.stroke();
+    }
+  }
+
+  const hud = $('hud');
+  function buildHud() {
+    hud.innerHTML = '';
+    for (const p of players) {
+      const d = document.createElement('div');
+      d.style.background = css(p.br, p.bg, p.bb);
+      hud.appendChild(d);
+      p.hudEl = d;
+    }
+  }
+  function updateHud() {
+    for (const p of players) {
+      p.hudEl.style.flexGrow = p.count;
+      p.hudEl.style.display = p.count ? '' : 'none';
+    }
+  }
+
+  // ---- game loop -----------------------------------------------------------
+  let running = false, frame = 0, last = 0, fieldCursor = 0, firstMover = 0;
+
+  function startGame(opts) {
+    buildMap(MAPS[opts.map]);
+    nPoints = 0;
+    players = [makePlayer(0, PLAYER_RGB, humanBrain)];
+    for (let i = 0; i < opts.cpus; i++) players.push(makePlayer(i + 1, CPU_RGB[i], cpuBrain()));
+    players = players.filter(p => spawn(p, opts.size));
+    players.forEach((p, i) => {
+      p.idx = i;
+      for (let k = 0; k < p.count; k++) ptOwner[p.list[k]] = i;
+    });
+    players.forEach(flood);
+    sizeCanvases();
+    buildHud(); updateHud();
+    hud.style.display = 'flex';
+    $('menu').style.display = 'none';
+    keys.clear();
+    running = true; frame = 0; last = performance.now(); viewDist = 150;
+    requestAnimationFrame(tick);
+  }
+
+  function endGame(message) {
+    running = false;
+    hud.style.display = 'none';
+    $('result').textContent = message || '';
+    $('menu').style.display = 'flex';
+    $('start').focus();
+  }
+
+  function tick(now) {
+    if (!running) return;
+    const dtMs = Math.min(now - last, 100);
+    last = now;
+    const t = dtMs / 40, you = players[0];
+
+    for (const p of players) {
+      if (p.count === 0 && p !== you) continue;
+      p.brain(p, dtMs);
+      movePlayer(p, t);
+    }
+    // keep your goo's map fresh every frame, the CPUs' on a rotation
+    flood(you);
+    for (let k = 0; k < 2 && players.length > 1; k++) {
+      fieldCursor = fieldCursor % (players.length - 1) + 1;
+      if (players[fieldCursor].count > 0) flood(players[fieldCursor]);
+    }
+    // rotate who moves first so nobody gets a permanent edge
+    firstMover = (firstMover + 1) % players.length;
+    for (let k = 0; k < players.length; k++) {
+      const p = players[(firstMover + k) % players.length];
+      if (p.count > 0) movePoints(p, t);
+    }
+
+    raycast(you);
+    drawMap(you);
+
+    if (++frame % 10 === 0) {
+      updateHud();
+      const alive = players.filter(p => p.count > 0);
+      if (you.count === 0) return endGame('Oh noes! You lost.');
+      if (alive.length === 1) return endGame('Yay! You won!');
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ---- input ---------------------------------------------------------------
+  addEventListener('keydown', e => {
+    if (!running) return;
+    if (e.code === 'Escape') return endGame('');
+    keys.add(e.code);
+    if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+  });
+  addEventListener('keyup', e => keys.delete(e.code));
+  addEventListener('blur', () => keys.clear());
+  addEventListener('resize', () => { if (running) sizeCanvases(); });
+
+  const pointers = new Map();
+  function recomputeTouch() {
+    touch.move = touch.strafe = touch.turn = 0;
+    for (const q of pointers.values()) {
+      const dx = clamp((q.x - q.x0) / 50, -1, 1), dy = clamp((q.y - q.y0) / 50, -1, 1);
+      touch.move -= dy;
+      if (q.left) touch.strafe += dx; else touch.turn += dx;
+    }
+  }
+  frontCanvas.addEventListener('pointerdown', e => {
+    pointers.set(e.pointerId, { x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, left: e.clientX < innerWidth / 2 });
+    frontCanvas.setPointerCapture(e.pointerId);
+  });
+  frontCanvas.addEventListener('pointermove', e => {
+    const q = pointers.get(e.pointerId);
+    if (q) { q.x = e.clientX; q.y = e.clientY; recomputeTouch(); }
+  });
+  const lift = e => { pointers.delete(e.pointerId); recomputeTouch(); };
+  frontCanvas.addEventListener('pointerup', lift);
+  frontCanvas.addEventListener('pointercancel', lift);
+
+  // ---- menu ----------------------------------------------------------------
+  let selectedMap = 'Box';
+  const mapBox = $('maps');
+  for (const name of Object.keys(MAPS)) {
+    buildMap(MAPS[name]);
+    const c = document.createElement('canvas');
+    c.width = c.height = N;
+    const ctx = c.getContext('2d'), img = ctx.createImageData(N, N), u = new Uint32Array(img.data.buffer);
+    for (let i = 0; i < N * N; i++) u[i] = grid[i] === WALL ? 0xff000000 : WHITE;
+    ctx.putImageData(img, 0, 0);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('aria-pressed', String(name === selectedMap));
+    btn.append(c, name);
+    btn.addEventListener('click', () => {
+      selectedMap = name;
+      for (const b of mapBox.children) b.setAttribute('aria-pressed', String(b === btn));
+    });
+    mapBox.appendChild(btn);
+  }
+
+  $('start').addEventListener('click', () => {
+    const num = (id, lo, hi, dflt) => {
+      const n = parseInt($(id).value, 10);
+      return isNaN(n) ? dflt : clamp(n, lo, hi);
+    };
+    startGame({
+      map: selectedMap,
+      cpus: num('numCPUs', 1, CPU_RGB.length, 5),
+      size: num('startPoints', 5, 25, 10)
+    });
+  });
+})();
+</script>
+</body>
+</html>
